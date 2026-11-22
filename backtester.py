@@ -166,6 +166,7 @@ def run_backtest(
     entry_cost_total = 0.0
 
     equity_curve = []
+    in_position = []
     trades = []
 
     dates = data.index
@@ -218,6 +219,9 @@ def run_backtest(
             entry_price = 0.0
             entry_date = None
             entry_cost_total = 0.0
+
+        # Exposure: bar counts as invested if a position is held after open execution
+        in_position.append(shares > 0.0)
 
         # 2. Check intraday Stop-Loss and Take-Profit while holding a position
         if shares > 0.0:
@@ -280,6 +284,7 @@ def run_backtest(
         }
 
     data["Strategy_Equity"] = equity_curve
+    data["In_Position"] = in_position
 
     # Buy & Hold benchmark (buy at first bar's Open with commission)
     first_open = float(opens[0])
@@ -324,11 +329,20 @@ def calculate_metrics(data: pd.DataFrame, trades_df: pd.DataFrame, initial_capit
 
     max_drawdown_pct = float(data["Drawdown_Pct"].min())
 
+    # Buy & Hold comparatives
+    bh_cagr_pct = ((bh_final / initial_capital) ** (1.0 / years) - 1.0) * 100.0 if bh_final > 0.0 else -100.0
+    bh_peak = data["Benchmark_Equity"].cummax()
+    bh_max_dd_pct = float(((data["Benchmark_Equity"] - bh_peak) / bh_peak * 100.0).min())
+
+    exposure_pct = float(data["In_Position"].mean()) * 100.0
+
     total_trades = len(trades_df)
     if total_trades > 0:
         wins = trades_df[trades_df["Net P&L"] > 0]
         losses = trades_df[trades_df["Net P&L"] < 0]
         win_rate_pct = (len(wins) / total_trades) * 100.0
+        avg_win_pct = float(wins["Return (%)"].mean()) if len(wins) else 0.0
+        avg_loss_pct = float(losses["Return (%)"].mean()) if len(losses) else 0.0
 
         gross_profit = float(wins["Net P&L"].sum())
         gross_loss = abs(float(losses["Net P&L"].sum()))
@@ -341,6 +355,8 @@ def calculate_metrics(data: pd.DataFrame, trades_df: pd.DataFrame, initial_capit
     else:
         win_rate_pct = 0.0
         profit_factor = 0.0
+        avg_win_pct = 0.0
+        avg_loss_pct = 0.0
 
     return {
         "final_equity": final_equity,
@@ -352,4 +368,9 @@ def calculate_metrics(data: pd.DataFrame, trades_df: pd.DataFrame, initial_capit
         "total_trades": total_trades,
         "win_rate_pct": win_rate_pct,
         "profit_factor": profit_factor,
+        "avg_win_pct": avg_win_pct,
+        "avg_loss_pct": avg_loss_pct,
+        "exposure_pct": exposure_pct,
+        "bh_cagr_pct": bh_cagr_pct,
+        "bh_max_dd_pct": bh_max_dd_pct,
     }
