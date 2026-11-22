@@ -51,11 +51,12 @@ st.markdown(
 # --- Sidebar Configuration ---
 with st.sidebar:
     st.markdown("### Market & Timeframe")
-    preset_cols = st.columns(4)
     presets = ["SPY", "QQQ", "D05.SI", "BTC-USD"]
-    for idx, sym in enumerate(presets):
-        if preset_cols[idx].button(sym, use_container_width=True):
-            st.session_state["ticker_input"] = sym
+    for row in (presets[:2], presets[2:]):
+        preset_cols = st.columns(2)
+        for col, sym in zip(preset_cols, row):
+            if col.button(sym, width="stretch"):
+                st.session_state["ticker_input"] = sym
 
     ticker = st.text_input(
         "Yahoo Finance Ticker",
@@ -63,13 +64,29 @@ with st.sidebar:
         help="Enter any Yahoo Finance symbol (e.g. SPY, NVDA, D05.SI, 9988.HK, BTC-USD)",
     )
 
-    default_end = date.today()
-    default_start = default_end - timedelta(days=365 * 3)
-    col_d1, col_d2 = st.columns(2)
-    with col_d1:
-        start_date = st.date_input("Start Date", value=default_start)
-    with col_d2:
-        end_date = st.date_input("End Date", value=default_end)
+    today = date.today()
+    period_presets = {
+        "Last 10 years": (today - timedelta(days=365 * 10), today),
+        "Last 20 years": (today - timedelta(days=365 * 20), today),
+        "Last 3 years": (today - timedelta(days=365 * 3), today),
+        "2007-09 Global Financial Crisis": (date(2007, 10, 1), date(2009, 12, 31)),
+        "2022 Bear Market": (date(2021, 12, 1), date(2023, 1, 31)),
+        "Custom": None,
+    }
+    period_choice = st.selectbox(
+        "Test Period",
+        options=list(period_presets),
+        help="Longer windows and bear-market periods give a fairer view than a bull-market-only sample.",
+    )
+    if period_presets[period_choice] is None:
+        col_d1, col_d2 = st.columns(2)
+        with col_d1:
+            start_date = st.date_input("Start Date", value=today - timedelta(days=365 * 10))
+        with col_d2:
+            end_date = st.date_input("End Date", value=today)
+    else:
+        start_date, end_date = period_presets[period_choice]
+        st.caption(f"{start_date:%d %b %Y} to {end_date:%d %b %Y}")
 
     chart_style = st.radio("Price Chart Style", options=["Candlestick", "Line"], horizontal=True)
 
@@ -100,15 +117,24 @@ with st.sidebar:
     commission_pct = st.number_input(
         "Commission (%)", min_value=0.0, max_value=5.0, value=0.10, step=0.05, format="%.2f"
     )
-    col_r1, col_r2 = st.columns(2)
-    with col_r1:
-        stop_loss_pct = st.number_input(
-            "Stop-Loss (%)", min_value=0.0, max_value=50.0, value=5.0, step=0.5, format="%.1f"
-        )
-    with col_r2:
-        take_profit_pct = st.number_input(
-            "Take-Profit (%)", min_value=0.0, max_value=200.0, value=15.0, step=1.0, format="%.1f"
-        )
+    use_risk_exits = st.checkbox(
+        "Enable stop-loss / take-profit",
+        value=True,
+        help="Turn off to test the pure signal strategy. A tight take-profit can cap trend-following gains.",
+    )
+    if use_risk_exits:
+        col_r1, col_r2 = st.columns(2)
+        with col_r1:
+            stop_loss_pct = st.number_input(
+                "Stop-Loss (%)", min_value=0.0, max_value=50.0, value=5.0, step=0.5, format="%.1f"
+            )
+        with col_r2:
+            take_profit_pct = st.number_input(
+                "Take-Profit (%)", min_value=0.0, max_value=200.0, value=15.0, step=1.0, format="%.1f"
+            )
+    else:
+        stop_loss_pct = 0.0
+        take_profit_pct = 0.0
 
 # --- Validation & Execution ---
 if start_date >= end_date:
@@ -146,7 +172,8 @@ with header_left:
     st.caption(
         f"{start_date.strftime('%d %b %Y')} to {end_date.strftime('%d %b %Y')}  |  "
         f"Next-Open Execution  |  Comm: {commission_pct:.2f}%  |  "
-        f"SL: {stop_loss_pct:.1f}%  |  TP: {take_profit_pct:.1f}%"
+        f"SL: {f'{stop_loss_pct:.1f}%' if stop_loss_pct > 0 else 'off'}  |  "
+        f"TP: {f'{take_profit_pct:.1f}%' if take_profit_pct > 0 else 'off'}"
     )
 with header_right:
     latest_close = float(df["Close"].iloc[-1])
@@ -162,29 +189,50 @@ with header_right:
 excess_return = metrics["net_return_pct"] - metrics["bh_return_pct"]
 pf_display = "Inf" if metrics["profit_factor"] == float("inf") else f"{metrics['profit_factor']:.2f}"
 
-k1, k2, k3, k4 = st.columns(4)
-k1.metric(
-    label="Strategy Net Return",
-    value=f"{metrics['net_return_pct']:+.2f}%",
-    delta=f"{excess_return:+.2f}% vs B&H ({metrics['bh_return_pct']:+.2f}%)",
+# Row 1: headline result against the benchmark
+r1 = st.columns(4)
+r1[0].metric("Strategy Return", f"{metrics['net_return_pct']:+.2f}%")
+r1[1].metric("Buy & Hold Return", f"{metrics['bh_return_pct']:+.2f}%")
+r1[2].metric(
+    "Excess vs B&H",
+    f"{excess_return:+.2f}%",
+    delta="Beats B&H" if excess_return >= 0 else "Lags B&H",
 )
-k2.metric(
-    label="Final Portfolio Value",
-    value=f"{metrics['final_equity']:,.2f}",
-    delta=f"{metrics['final_equity'] - initial_capital:+,.2f}",
+r1[3].metric(
+    "Final Value",
+    f"{metrics['final_equity']:,.0f}",
+    delta=f"{metrics['final_equity'] - initial_capital:+,.0f}",
 )
-k3.metric(
-    label="CAGR / Sharpe Ratio",
-    value=f"{metrics['cagr_pct']:.2f}%",
-    delta=f"Sharpe: {metrics['sharpe_ratio']:.2f}",
+
+# Row 2: risk-adjusted profile, each with the Buy & Hold comparative
+r2 = st.columns(4)
+r2[0].metric("CAGR", f"{metrics['cagr_pct']:.2f}%", delta=f"B&H {metrics['bh_cagr_pct']:.2f}%", delta_color="off")
+r2[1].metric(
+    "Max Drawdown",
+    f"{metrics['max_drawdown_pct']:.2f}%",
+    delta=f"B&H {metrics['bh_max_dd_pct']:.2f}%",
     delta_color="off",
 )
-k4.metric(
-    label="Max Drawdown",
-    value=f"{metrics['max_drawdown_pct']:.2f}%",
-    delta=f"{metrics['total_trades']} Trades | Win: {metrics['win_rate_pct']:.1f}% | PF: {pf_display}",
-    delta_color="off",
+r2[2].metric("Sharpe (rf = 0)", f"{metrics['sharpe_ratio']:.2f}")
+r2[3].metric("Time in Market", f"{metrics['exposure_pct']:.1f}%")
+
+# Row 3: trade statistics
+r3 = st.columns(4)
+r3[0].metric("Closed Trades", f"{metrics['total_trades']}")
+r3[1].metric("Win Rate", f"{metrics['win_rate_pct']:.1f}%")
+r3[2].metric("Profit Factor", pf_display)
+r3[3].metric(
+    "Avg Win / Avg Loss",
+    f"{metrics['avg_win_pct']:+.1f}% / {metrics['avg_loss_pct']:+.1f}%",
 )
+
+if metrics["total_trades"] < 10:
+    st.warning(
+        f"Only {metrics['total_trades']} closed trade(s). Win rate, profit factor and Sharpe are "
+        "statistically weak at this sample size; use a longer test period."
+    )
+if df.index[0] > pd.Timestamp(start_date) + pd.Timedelta(days=10):
+    st.caption(f"Note: market data for {ticker.upper()} only begins on {df.index[0]:%d %b %Y}.")
 
 if open_position is not None:
     st.info(
@@ -235,7 +283,7 @@ with tab_charts:
         )
         fig_equity.update_xaxes(showgrid=True, gridcolor="rgba(128,128,128,0.12)")
         fig_equity.update_yaxes(showgrid=True, gridcolor="rgba(128,128,128,0.12)")
-        st.plotly_chart(fig_equity, use_container_width=True)
+        st.plotly_chart(fig_equity, width="stretch")
 
     with col_dd:
         fig_dd = go.Figure()
@@ -261,7 +309,7 @@ with tab_charts:
         )
         fig_dd.update_xaxes(showgrid=True, gridcolor="rgba(128,128,128,0.12)")
         fig_dd.update_yaxes(showgrid=True, gridcolor="rgba(128,128,128,0.12)")
-        st.plotly_chart(fig_dd, use_container_width=True)
+        st.plotly_chart(fig_dd, width="stretch")
 
     # Row 2: Synchronised Two-Panel Price + Signals + Sub-Indicator Chart
     sub_title = "RSI Oscillator" if strategy == "RSI Mean Reversion" else "Trading Volume"
@@ -444,7 +492,7 @@ with tab_charts:
     fig_price.update_xaxes(showgrid=True, gridcolor="rgba(128,128,128,0.12)")
     fig_price.update_yaxes(showgrid=True, gridcolor="rgba(128,128,128,0.12)")
     fig_price.update_yaxes(title_text="Price", row=1, col=1)
-    st.plotly_chart(fig_price, use_container_width=True)
+    st.plotly_chart(fig_price, width="stretch")
 
 with tab_trades:
     if trades_df.empty:
@@ -478,12 +526,12 @@ with tab_trades:
                 data=csv_bytes,
                 file_name=f"{ticker.upper()}_{strategy.lower().replace(' ', '_')}_trades.csv",
                 mime="text/csv",
-                use_container_width=True,
+                width="stretch",
             )
 
         st.dataframe(
             filtered_trades,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "Entry Price": st.column_config.NumberColumn(format="%.2f"),
@@ -493,3 +541,10 @@ with tab_trades:
                 "Return (%)": st.column_config.NumberColumn(format="%+.2f%%"),
             },
         )
+
+st.divider()
+st.caption(
+    "Educational tool only; not investment advice. Backtests are hypothetical and past performance does not "
+    "predict future results. Results exclude slippage, taxes, dividends beyond Yahoo's adjusted prices, and "
+    "survivorship bias. Sharpe uses a 0% risk-free rate. Data: Yahoo Finance via yfinance."
+)
