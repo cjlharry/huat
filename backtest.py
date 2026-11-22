@@ -11,10 +11,13 @@ def fetch_market_data(ticker: str, start_date: str, end_date: str) -> pd.DataFra
     if not clean_ticker:
         raise ValueError("Please enter a valid ticker symbol.")
 
+    # Make end_date inclusive since yfinance treats end as exclusive
+    end_inclusive = (pd.to_datetime(end_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
     df = yf.download(
         clean_ticker,
         start=start_date,
-        end=end_date,
+        end=end_inclusive,
         auto_adjust=True,
         progress=False,
     )
@@ -25,19 +28,32 @@ def fetch_market_data(ticker: str, start_date: str, end_date: str) -> pd.DataFra
             "Please check the ticker symbol and date range."
         )
 
-    # Flatten MultiIndex columns introduced in newer yfinance releases
+    required_cols = {"Open", "High", "Low", "Close", "Volume"}
+
+    # Safely flatten MultiIndex columns regardless of level ordering
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+        level_0 = set(df.columns.get_level_values(0))
+        level_1 = set(df.columns.get_level_values(1))
+        if required_cols.issubset(level_0):
+            df.columns = df.columns.get_level_values(0)
+        elif required_cols.issubset(level_1):
+            df.columns = df.columns.get_level_values(1)
+        else:
+            df.columns = df.columns.get_level_values(0)
 
     df = df.loc[:, ~df.columns.duplicated()].copy()
 
-    required_cols = {"Open", "High", "Low", "Close", "Volume"}
     missing_cols = required_cols - set(df.columns)
     if missing_cols:
         raise ValueError(f"Missing required market data columns: {', '.join(sorted(missing_cols))}")
 
     df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
-    df.index = pd.to_datetime(df.index)
+
+    # Normalise DatetimeIndex to timezone-naive timestamps
+    idx = pd.to_datetime(df.index)
+    if idx.tz is not None:
+        idx = idx.tz_convert(None)
+    df.index = idx
     df.sort_index(inplace=True)
 
     if len(df) < 5:
@@ -89,8 +105,13 @@ def generate_signals(df: pd.DataFrame, strategy: str, params: dict) -> pd.DataFr
         avg_loss = loss.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
 
         rs = avg_gain / avg_loss.replace(0.0, np.nan)
-        data["RSI"] = 100.0 - (100.0 / (1.0 + rs))
-        data["RSI"] = data["RSI"].fillna(100.0)
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+
+        # Preserve warmup NaNs while handling flat or zero-loss windows accurately
+        both_zero = (avg_gain == 0.0) & (avg_loss == 0.0)
+        only_loss_zero = (avg_loss == 0.0) & (avg_gain > 0.0)
+        rsi = np.where(both_zero, 50.0, np.where(only_loss_zero, 100.0, rsi))
+        data["RSI"] = pd.Series(rsi, index=data.index)
 
         buy_cond = (data["RSI"] < oversold) & (data["RSI"].shift(1) >= oversold)
         sell_cond = (data["RSI"] > overbought) & (data["RSI"].shift(1) <= overbought)
@@ -175,7 +196,7 @@ def run_backtest(
                 entry_price = open_p
                 entry_date = date
 
-        elif shares > 0.0 and sig == -1:
+        elif shares > 0.0 and sig == -1 and open_p > 0.0:
             gross_proceeds = shares * open_p
             exit_commission = gross_proceeds * comm_rate
             net_proceeds = gross_proceeds - exit_commission
@@ -211,10 +232,10 @@ def run_backtest(
             if hit_sl or hit_tp:
                 # Conservative assumption: evaluate Stop-Loss first if both breach intraday
                 if hit_sl:
-                    exec_price = min(open_p, sl_price) if open_p < sl_price else sl_price
+                    exec_price = min(open_p, sl_price)
                     reason = "Stop-Loss"
                 else:
-                    exec_price = max(open_p, tp_price) if open_p > tp_price else tp_price
+                    exec_price = max(open_p, tp_price)
                     reason = "Take-Profit"
 
                 gross_proceeds = shares * exec_price
@@ -245,37 +266,30 @@ def run_backtest(
         daily_equity = cash + shares * close_p
         equity_curve.append(daily_equity)
 
-    # Close any open position on the final bar for complete trade accounting
+    # Track any open position separately without inflating closed trade statistics
+    open_position = None
     if shares > 0.0:
-        final_date = dates[-1]
         final_close = float(closes[-1])
-        gross_proceeds = shares * final_close
-        exit_commission = gross_proceeds * comm_rate
-        net_proceeds = gross_proceeds - exit_commission
-        cash += net_proceeds
-
-        net_pnl = net_proceeds - entry_cost_total
-        ret_pct = (net_pnl / entry_cost_total) * 100.0
-        trades.append(
-            {
-                "Entry Date": entry_date.strftime("%Y-%m-%d"),
-                "Exit Date": final_date.strftime("%Y-%m-%d"),
-                "Entry Price": round(entry_price, 4),
-                "Exit Price": round(final_close, 4),
-                "Shares": round(shares, 4),
-                "Net P&L": round(net_pnl, 2),
-                "Return (%)": round(ret_pct, 2),
-                "Exit Reason": "End of Period",
-            }
-        )
-        equity_curve[-1] = cash
+        market_value = shares * final_close
+        unrealised_pnl = market_value - entry_cost_total
+        open_position = {
+            "entry_date": entry_date.strftime("%Y-%m-%d"),
+            "entry_price": round(entry_price, 4),
+            "current_price": round(final_close, 4),
+            "shares": round(shares, 4),
+            "unrealised_pnl": round(unrealised_pnl, 2),
+            "unrealised_return_pct": round((unrealised_pnl / entry_cost_total) * 100.0, 2),
+        }
 
     data["Strategy_Equity"] = equity_curve
 
     # Buy & Hold benchmark (buy at first bar's Open with commission)
     first_open = float(opens[0])
-    bh_shares = (initial_capital / (1.0 + comm_rate)) / first_open
-    data["Benchmark_Equity"] = bh_shares * data["Close"]
+    if first_open > 0.0:
+        bh_shares = (initial_capital / (1.0 + comm_rate)) / first_open
+        data["Benchmark_Equity"] = bh_shares * data["Close"]
+    else:
+        data["Benchmark_Equity"] = float(initial_capital)
 
     # Drawdown series (%)
     rolling_peak = data["Strategy_Equity"].cummax()
@@ -288,13 +302,14 @@ def run_backtest(
         "data": data,
         "trades": trades_df,
         "metrics": metrics,
+        "open_position": open_position,
     }
 
 
 def calculate_metrics(data: pd.DataFrame, trades_df: pd.DataFrame, initial_capital: float) -> dict:
-    """Compute portfolio and trade-level performance statistics."""
-    final_equity = float(data["Strategy_Equity"].iloc[-1])
-    bh_final = float(data["Benchmark_Equity"].iloc[-1])
+    """Compute portfolio and closed trade-level performance statistics."""
+    final_equity = max(float(data["Strategy_Equity"].iloc[-1]), 0.0)
+    bh_final = max(float(data["Benchmark_Equity"].iloc[-1]), 0.0)
 
     net_return_pct = ((final_equity - initial_capital) / initial_capital) * 100.0
     bh_return_pct = ((bh_final - initial_capital) / initial_capital) * 100.0
