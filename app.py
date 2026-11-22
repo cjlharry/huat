@@ -93,6 +93,7 @@ except Exception as exc:
 df = results["data"]
 trades_df = results["trades"]
 metrics = results["metrics"]
+open_position = results["open_position"]
 
 # --- KPI Metrics Row ---
 st.subheader(f"Performance Summary: {ticker.upper()} ({strategy})")
@@ -111,10 +112,18 @@ row1_cols[2].metric(label="Sharpe Ratio", value=f"{metrics['sharpe_ratio']:.2f}"
 row1_cols[3].metric(label="Max Drawdown", value=f"{metrics['max_drawdown_pct']:.2f}%")
 
 row2_cols = st.columns(4)
-row2_cols[0].metric(label="Total Trades", value=f"{metrics['total_trades']}")
+row2_cols[0].metric(label="Closed Trades", value=f"{metrics['total_trades']}")
 row2_cols[1].metric(label="Win Rate", value=f"{metrics['win_rate_pct']:.1f}%")
 row2_cols[2].metric(label="Profit Factor", value=pf_display)
 row2_cols[3].metric(label="Final Equity", value=f"${metrics['final_equity']:,.2f}")
+
+if open_position is not None:
+    st.info(
+        f"**Open Position Held at End of Period:** Entered on {open_position['entry_date']} at "
+        f"${open_position['entry_price']:,.2f} ({open_position['shares']:.4f} shares) | "
+        f"Current Price: ${open_position['current_price']:,.2f} | "
+        f"Unrealised P&L: ${open_position['unrealised_pnl']:+,.2f} ({open_position['unrealised_return_pct']:+.2f}%)"
+    )
 
 st.divider()
 
@@ -210,16 +219,28 @@ elif strategy == "Bollinger Band Breakout":
         )
     )
 
+# Plot closed trade markers plus any active open entry marker
+buy_dates = []
+buy_prices = []
 if not trades_df.empty:
+    buy_dates.extend(pd.to_datetime(trades_df["Entry Date"]).tolist())
+    buy_prices.extend(trades_df["Entry Price"].tolist())
+if open_position is not None:
+    buy_dates.append(pd.to_datetime(open_position["entry_date"]))
+    buy_prices.append(open_position["entry_price"])
+
+if buy_dates:
     fig_price.add_trace(
         go.Scatter(
-            x=pd.to_datetime(trades_df["Entry Date"]),
-            y=trades_df["Entry Price"],
+            x=buy_dates,
+            y=buy_prices,
             mode="markers",
             name="Buy Execution",
             marker=dict(symbol="triangle-up", size=11, color="#00c853", line=dict(width=1, color="#004d40")),
         )
     )
+
+if not trades_df.empty:
     fig_price.add_trace(
         go.Scatter(
             x=pd.to_datetime(trades_df["Exit Date"]),
@@ -264,9 +285,9 @@ st.plotly_chart(fig_dd, use_container_width=True)
 st.divider()
 
 # --- Trade Log & CSV Export ---
-st.subheader("Executed Trade Log")
+st.subheader("Closed Trade Log")
 if trades_df.empty:
-    st.info("No trades were triggered for the selected parameters and date range.")
+    st.info("No closed trades were recorded for the selected parameters and date range.")
 else:
     col_search, col_export = st.columns([3, 1])
     with col_search:
