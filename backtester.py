@@ -1,10 +1,8 @@
 import numpy as np
 import pandas as pd
-import streamlit as st
 import yfinance as yf
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_market_data(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
     """Fetch historical OHLCV data from Yahoo Finance and normalise columns."""
     clean_ticker = ticker.strip().upper()
